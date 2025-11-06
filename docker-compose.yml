@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7.0-alpine
+    container_name: vpnserver-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - vpnserver-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  vpnserver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vpnserver-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "443:443"
+    volumes:
+      - ./data:/app/data
+      - ./xray-config:/usr/local/etc/xray
+      - ./logs:/var/log/xray
+      - ./CONF.py:/app/CONF.py:ro
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - API_ONLY=false
+      - DATA_DIR=/app/data
+      - DATABASE_PATH=/app/data/vpnserver.db
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - vpnserver-network
+    # Привилегированный режим может потребоваться для некоторых операций Xray
+    # Но обычно не требуется, если правильно настроены права
+    # privileged: true
+    # Альтернативно можно использовать network_mode: host для Xray
+    # network_mode: host
+
+networks:
+  vpnserver-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+    driver: local
+
