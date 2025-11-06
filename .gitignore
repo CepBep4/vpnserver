@@ -16,7 +16,6 @@ build/
 *.db
 *.sqlite
 *.sqlite3
-*.db-journal
 
 # IDE
 .vscode/
@@ -31,26 +30,4 @@ Thumbs.db
 
 # Logs
 *.log
-logs/
-*.log.*
-
-# Docker
-.env
-.env.local
-data/
-logs/
-xray-config/
-
-# Celery
-celerybeat-schedule
-celerybeat.pid
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Misc
-*.bak
-*.tmp
 

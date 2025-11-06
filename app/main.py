@@ -2,6 +2,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import base, auth, subscriptions
 from app.db.database import init_db
+import logging
+
+# Базовая конфигурация логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 # Создаем экземпляр FastAPI приложения
 app = FastAPI(
@@ -35,7 +42,7 @@ async def startup_event():
     """
     # Инициализация базы данных
     init_db()
-    print("База данных инициализирована")
+    logging.info("База данных инициализирована")
 
 
 @app.on_event("shutdown")
@@ -43,5 +50,5 @@ async def shutdown_event():
     """
     Действия при остановке приложения.
     """
-    print("Приложение остановлено")
+    logging.info("Приложение остановлено")
 

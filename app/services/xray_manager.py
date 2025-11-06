@@ -1,21 +1,35 @@
 import json
 import subprocess
 import os
+import logging
+import time
+import fcntl
 from typing import Dict
 from app.core.config import settings
 
 
 XRAY_CONFIG_PATH = settings.XRAY_CONFIG_PATH
+LOCK_PATH = XRAY_CONFIG_PATH + '.lock'
 
 
 def read_xray_config() -> Dict:
     """Читает конфигурацию Xray из файла."""
     try:
-        with open(XRAY_CONFIG_PATH, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-    except json.JSONDecodeError:
+        # Разделяемая блокировка на время чтения
+        os.makedirs(os.path.dirname(XRAY_CONFIG_PATH), exist_ok=True)
+        with open(LOCK_PATH, 'a+') as lockf:
+            fcntl.flock(lockf, fcntl.LOCK_SH)
+            try:
+                with open(XRAY_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except FileNotFoundError:
+                return {}
+            except json.JSONDecodeError:
+                return {}
+            finally:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+    except Exception as e:
+        logging.error("Ошибка чтения конфигурации Xray: %s", e)
         return {}
 
 
@@ -24,13 +38,21 @@ def write_xray_config(config: Dict):
     # Создаем временный файл для атомарной записи
     temp_path = XRAY_CONFIG_PATH + '.tmp'
     try:
-        with open(temp_path, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-        # Атомарно перемещаем файл
-        os.rename(temp_path, XRAY_CONFIG_PATH)
+        os.makedirs(os.path.dirname(XRAY_CONFIG_PATH), exist_ok=True)
+        # Эксклюзивная блокировка на время записи
+        with open(LOCK_PATH, 'a+') as lockf:
+            fcntl.flock(lockf, fcntl.LOCK_EX)
+            try:
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                # Атомарно заменяем файл (безусловная замена надёжнее os.rename)
+                os.replace(temp_path, XRAY_CONFIG_PATH)
+            finally:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
     except Exception as e:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+        logging.exception("Ошибка записи конфигурации Xray")
         raise e
 
 
@@ -46,7 +68,6 @@ def reload_xray():
             timeout=10
         )
         # Даем время на перезапуск
-        import time
         time.sleep(2)
         
         # Проверяем, что сервис запущен
@@ -60,18 +81,18 @@ def reload_xray():
         if check_result.returncode == 0 and check_result.stdout.strip() == 'active':
             return True
         else:
-            print(f"Предупреждение: Xray может быть не запущен после перезагрузки")
+            logging.warning("Xray может быть не запущен после перезагрузки")
             return False
     except subprocess.CalledProcessError as e:
-        print(f"Ошибка перезагрузки Xray: {e}")
+        logging.error("Ошибка перезагрузки Xray: %s", e)
         if e.stderr:
-            print(f"Детали ошибки: {e.stderr}")
+            logging.error("Детали ошибки: %s", e.stderr)
         return False
     except subprocess.TimeoutExpired:
-        print(f"Таймаут при перезагрузке Xray")
+        logging.error("Таймаут при перезагрузке Xray")
         return False
     except Exception as e:
-        print(f"Неожиданная ошибка при перезагрузке Xray: {e}")
+        logging.exception("Неожиданная ошибка при перезагрузке Xray: %s", e)
         return False
 
 
@@ -143,7 +164,7 @@ def get_or_create_xray_config() -> Dict:
     return config
 
 
-def add_user_to_xray(uuid_str: str, email: str) -> bool:
+def add_user_to_xray(uuid_str: str, email: str, reload_on_change: bool = True) -> bool:
     """Добавляет пользователя в конфигурацию Xray."""
     config = get_or_create_xray_config()
     
@@ -153,7 +174,7 @@ def add_user_to_xray(uuid_str: str, email: str) -> bool:
     # Проверяем по UUID
     for client in clients:
         if client.get("id") == uuid_str:
-            print(f"Пользователь с UUID {uuid_str} уже существует в Xray")
+            logging.info("Пользователь с UUID %s уже существует в Xray", uuid_str)
             return True
     
     # Проверяем на дубликаты email и удаляем их (может быть только один пользователь с конкретным email)
@@ -171,7 +192,7 @@ def add_user_to_xray(uuid_str: str, email: str) -> bool:
             clients_cleaned.append(client)
         # Если это другой пользователь с таким же email - пропускаем (дубликат)
         elif client_email == email:
-            print(f"Предупреждение: найден дубликат пользователя с email {email}, UUID {client_uuid}. Удаляем дубликат.")
+            logging.warning("Найден дубликат email %s (UUID %s). Удаляем дубликат.", email, client_uuid)
             continue
         # Остальных добавляем
         else:
@@ -190,13 +211,17 @@ def add_user_to_xray(uuid_str: str, email: str) -> bool:
     
     write_xray_config(config)
     
-    # Перезагружаем Xray
-    if reload_xray():
-        print(f"Пользователь {email} добавлен в Xray и сервис перезагружен")
-        return True
+    # Перезагружаем Xray, если требуется
+    if reload_on_change:
+        if reload_xray():
+            logging.info("Пользователь %s добавлен в Xray и сервис перезагружен", email)
+            return True
+        else:
+            logging.error("Ошибка при перезагрузке Xray после добавления пользователя %s", email)
+            return False
     else:
-        print(f"Ошибка при перезагрузке Xray после добавления пользователя {email}")
-        return False
+        logging.info("Пользователь %s добавлен в Xray (перезагрузка отложена)", email)
+        return True
 
 
 def remove_user_from_xray(uuid_str: str) -> bool:
@@ -209,7 +234,7 @@ def remove_user_from_xray(uuid_str: str) -> bool:
     user_exists = any(client.get("id") == uuid_str for client in clients)
     
     if not user_exists:
-        print(f"Пользователь с UUID {uuid_str} не найден в Xray конфигурации")
+        logging.info("Пользователь с UUID %s не найден в Xray конфигурации", uuid_str)
         return True  # Уже удален - считаем успехом
     
     # Удаляем пользователя
@@ -220,17 +245,17 @@ def remove_user_from_xray(uuid_str: str) -> bool:
     # Сохраняем конфигурацию
     try:
         write_xray_config(config)
-        print(f"Пользователь с UUID {uuid_str} удален из конфигурации Xray")
+        logging.info("Пользователь с UUID %s удален из конфигурации Xray", uuid_str)
     except Exception as e:
-        print(f"Ошибка при сохранении конфигурации Xray: {e}")
+        logging.exception("Ошибка при сохранении конфигурации Xray: %s", e)
         return False
     
     # Перезагружаем Xray
     if reload_xray():
-        print(f"Пользователь с UUID {uuid_str} удален из Xray и сервис перезагружен")
+        logging.info("Пользователь с UUID %s удален из Xray и сервис перезагружен", uuid_str)
         return True
     else:
-        print(f"Ошибка при перезагрузке Xray после удаления пользователя {uuid_str}")
+        logging.error("Ошибка при перезагрузке Xray после удаления пользователя %s", uuid_str)
         # Даже если перезагрузка не удалась, конфигурация уже изменена
         # Возможно, нужно будет перезагрузить вручную
         return False
@@ -254,16 +279,27 @@ def check_xray_service_status() -> tuple[str, str]:
 def validate_xray_config() -> tuple[bool, str]:
     """Проверяет валидность конфигурации Xray."""
     try:
-        result = subprocess.run(
+        candidates = [
             ['/usr/local/bin/xray', '-test', '-config', XRAY_CONFIG_PATH],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        if result.returncode == 0:
-            return True, ""
-        else:
-            return False, result.stderr
+            ['xray', '-test', '-config', XRAY_CONFIG_PATH],
+        ]
+        last_error = ""
+        for cmd in candidates:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0:
+                    return True, ""
+                else:
+                    last_error = result.stderr or result.stdout
+            except FileNotFoundError as e:
+                last_error = str(e)
+                continue
+        return False, last_error
     except Exception as e:
         return False, str(e)
 
@@ -307,7 +343,7 @@ def fix_xray_config_duplicates() -> bool:
     if duplicates_removed > 0:
         config["inbounds"][0]["settings"]["clients"] = clients_cleaned
         write_xray_config(config)
-        print(f"Исправлено дубликатов: {duplicates_removed}")
+        logging.info("Исправлено дубликатов: %d", duplicates_removed)
         return True
     
     return False
@@ -327,37 +363,37 @@ def check_and_fix_xray() -> dict:
         "issues_found": []
     }
     
-    print("=" * 60)
-    print("Проверка и исправление проблем Xray")
-    print("=" * 60)
+    logging.info("%s", "=" * 60)
+    logging.info("Проверка и исправление проблем Xray")
+    logging.info("%s", "=" * 60)
     
     # 1. Проверка и исправление дубликатов в конфигурации
-    print("1. Проверка дубликатов в конфигурации...")
+    logging.info("1. Проверка дубликатов в конфигурации...")
     if fix_xray_config_duplicates():
         results["config_duplicates_fixed"] = True
         results["issues_found"].append("Обнаружены и исправлены дубликаты email в конфигурации")
-        print("   ✓ Дубликаты исправлены")
+        logging.info("   ✓ Дубликаты исправлены")
     else:
-        print("   ✓ Дубликатов не обнаружено")
+        logging.info("   ✓ Дубликатов не обнаружено")
     
     # 2. Валидация конфигурации
-    print("2. Валидация конфигурации Xray...")
+    logging.info("2. Валидация конфигурации Xray...")
     is_valid, error = validate_xray_config()
     if is_valid:
         results["config_validated"] = True
-        print("   ✓ Конфигурация валидна")
+        logging.info("   ✓ Конфигурация валидна")
     else:
         results["issues_found"].append(f"Конфигурация Xray невалидна: {error}")
-        print(f"   ✗ Конфигурация невалидна: {error}")
+        logging.error("   ✗ Конфигурация невалидна: %s", error)
     
     # 3. Проверка статуса сервиса
-    print("3. Проверка статуса сервиса Xray...")
+    logging.info("3. Проверка статуса сервиса Xray...")
     status, error = check_xray_service_status()
-    print(f"   Статус: {status}")
+    logging.info("   Статус: %s", status)
     
     if status != "active":
         results["issues_found"].append(f"Сервис Xray не запущен (статус: {status})")
-        print(f"   ⚠ Сервис не запущен, пытаемся запустить...")
+        logging.warning("   ⚠ Сервис не запущен, пытаемся запустить...")
         
         # Пытаемся запустить сервис
         try:
@@ -368,32 +404,31 @@ def check_and_fix_xray() -> dict:
                 text=True,
                 timeout=10
             )
-            import time
             time.sleep(2)
             
             # Проверяем еще раз
             new_status, _ = check_xray_service_status()
             if new_status == "active":
                 results["service_restarted"] = True
-                print("   ✓ Сервис успешно запущен")
+                logging.info("   ✓ Сервис успешно запущен")
             else:
-                print(f"   ✗ Не удалось запустить сервис (статус: {new_status})")
+                logging.error("   ✗ Не удалось запустить сервис (статус: %s)", new_status)
         except Exception as e:
             results["issues_found"].append(f"Ошибка при попытке запуска сервиса: {e}")
-            print(f"   ✗ Ошибка при запуске: {e}")
+            logging.exception("   ✗ Ошибка при запуске: %s", e)
     else:
-        print("   ✓ Сервис активен")
+        logging.info("   ✓ Сервис активен")
     
     # 4. Если были исправления - перезагружаем Xray
     if results["config_duplicates_fixed"]:
-        print("4. Перезагрузка Xray после исправлений...")
+        logging.info("4. Перезагрузка Xray после исправлений...")
         if reload_xray():
-            print("   ✓ Xray перезагружен")
+            logging.info("   ✓ Xray перезагружен")
         else:
             results["issues_found"].append("Не удалось перезагрузить Xray после исправлений")
-            print("   ✗ Ошибка при перезагрузке")
+            logging.error("   ✗ Ошибка при перезагрузке")
     
-    print("=" * 60)
+    logging.info("%s", "=" * 60)
     
     return results
 
@@ -407,4 +442,38 @@ def is_user_in_xray(uuid_str: str) -> bool:
         if client.get("id") == uuid_str:
             return True
     return False
+
+
+def clear_all_users_from_xray(reload_on_change: bool = True) -> bool:
+    """Удаляет всех пользователей (clients) из конфигурации Xray и при необходимости перезагружает сервис.
+
+    Args:
+        reload_on_change: Выполнить перезагрузку сервиса Xray после изменений.
+
+    Returns:
+        bool: True при успехе, False при ошибке (например, не удалось перезагрузить).
+    """
+    config = get_or_create_xray_config()
+    try:
+        # Гарантируем структуру inbounds[0].settings.clients
+        if "inbounds" not in config or not config["inbounds"]:
+            config["inbounds"] = [{"settings": {"clients": []}}]
+        if "settings" not in config["inbounds"][0]:
+            config["inbounds"][0]["settings"] = {"clients": []}
+        config["inbounds"][0]["settings"]["clients"] = []
+
+        write_xray_config(config)
+        logging.info("Все профили (clients) удалены из конфигурации Xray")
+
+        if reload_on_change:
+            if reload_xray():
+                logging.info("Xray перезагружен после удаления всех профилей")
+                return True
+            else:
+                logging.error("Не удалось перезагрузить Xray после удаления всех профилей")
+                return False
+        return True
+    except Exception as e:
+        logging.exception("Ошибка при очистке профилей Xray: %s", e)
+        return False
 

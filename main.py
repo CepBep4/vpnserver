@@ -13,20 +13,14 @@ import os
 def check_redis():
     """Проверяет доступность Redis."""
     import redis
-    import os
-    
-    # Проверяем переменные окружения для Docker
-    redis_host = os.getenv('REDIS_HOST', 'localhost')
-    redis_port = int(os.getenv('REDIS_PORT', '6379'))
-    
     try:
-        r = redis.Redis(host=redis_host, port=redis_port, db=0, socket_timeout=2)
+        r = redis.Redis(host='localhost', port=6379, db=0)
         r.ping()
-        print(f"✓ Redis доступен на {redis_host}:{redis_port}")
+        print("✓ Redis доступен")
         return True
     except Exception as e:
-        print(f"✗ Redis недоступен на {redis_host}:{redis_port}: {e}")
-        print("Попытка запустить Redis локально...")
+        print(f"✗ Redis недоступен: {e}")
+        print("Попытка запустить Redis...")
         return False
 
 
@@ -110,26 +104,14 @@ if __name__ == "__main__":
     
     # Проверяем Redis
     redis_process = None
-    redis_host = os.getenv('REDIS_HOST', 'localhost')
-    redis_port = int(os.getenv('REDIS_PORT', '6379'))
-    
     if not check_redis():
-        # Пытаемся запустить Redis только если он не был указан через переменные окружения
-        if redis_host == 'localhost':
-            redis_process = start_redis()
-            if not redis_process and not check_redis():
-                print("\n⚠️  ВНИМАНИЕ: Redis недоступен!")
-                print("Celery не сможет работать без Redis.")
-                print("Установите Redis: sudo apt-get install redis-server")
-                print("Или запустите через Docker: docker run -d -p 6379:6379 redis:latest")
-                print("Или укажите REDIS_HOST и REDIS_PORT через переменные окружения")
-                print("\nПродолжаю запуск только FastAPI сервера...")
-                run_fastapi()
-                sys.exit(0)
-        else:
-            print(f"\n⚠️  ВНИМАНИЕ: Redis недоступен на {redis_host}:{redis_port}!")
-            print("Убедитесь, что Redis сервис запущен и доступен.")
-            print("Продолжаю запуск только FastAPI сервера...")
+        redis_process = start_redis()
+        if not redis_process and not check_redis():
+            print("\n⚠️  ВНИМАНИЕ: Redis недоступен!")
+            print("Celery не сможет работать без Redis.")
+            print("Установите Redis: sudo apt-get install redis-server")
+            print("Или запустите через Docker: docker run -d -p 6379:6379 redis:latest")
+            print("\nПродолжаю запуск только FastAPI сервера...")
             run_fastapi()
             sys.exit(0)
     

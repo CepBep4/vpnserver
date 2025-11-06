@@ -1,6 +1,13 @@
 from celery import Celery
 from celery.schedules import crontab
 import os
+import logging
+
+# Базовая конфигурация логирования (если ещё не настроено)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 # Создаем экземпляр Celery
 celery_app = Celery(

@@ -2,7 +2,7 @@ from app.celery_app import celery_app
 from app.db.database import SessionLocal
 from app.models.subscription import Subscription
 from app.services.vless import create_vless_profile, disable_vless_profile, extract_uuid_from_link
-from app.services.xray_manager import is_user_in_xray, add_user_to_xray, check_and_fix_xray
+from app.services.xray_manager import is_user_in_xray, add_user_to_xray, check_and_fix_xray, reload_xray
 from datetime import datetime
 
 
@@ -37,6 +37,7 @@ def check_subscriptions():
     }
     
     try:
+        reload_needed = False
         # Получаем все подписки
         subscriptions = db.query(Subscription).all()
         stats["total"] = len(subscriptions)
@@ -57,8 +58,9 @@ def check_subscriptions():
                 if uuid_from_link:
                     if not is_user_in_xray(uuid_from_link):
                         email = f"{subscription.username}@sunstrikevpn.local"
-                        if add_user_to_xray(uuid_from_link, email):
+                        if add_user_to_xray(uuid_from_link, email, reload_on_change=False):
                             print(f"  ✓ Пользователь {subscription.username} добавлен в Xray")
+                            reload_needed = True
                         else:
                             print(f"  ✗ Ошибка: не удалось добавить пользователя {subscription.username} в Xray")
                             stats["no_changes"] += 1
@@ -148,6 +150,14 @@ def check_subscriptions():
         print(f"  Активировано профилей: {stats['activated']}")
         print(f"  Отключено профилей: {stats['deactivated']}")
         print(f"  Без изменений: {stats['no_changes']}")
+
+        # Единоразовая перезагрузка Xray, если в ходе обхода были изменения
+        if reload_needed:
+            print("Перезагрузка Xray после изменений пользователей...")
+            if reload_xray():
+                print("  ✓ Xray перезагружен")
+            else:
+                print("  ✗ Не удалось перезагрузить Xray. Проверьте состояние сервиса.")
         
         # Показываем результаты проверки Xray
         if xray_check_results.get("issues_found"):

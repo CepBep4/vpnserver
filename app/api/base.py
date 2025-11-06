@@ -80,7 +80,10 @@ def count_xray_users() -> tuple[int, str]:
         if not config:
             return 0, "Конфигурация Xray не найдена"
         
-        clients = config.get("clients", [])
+        inbounds = config.get("inbounds", [])
+        if not inbounds:
+            return 0, "В конфигурации Xray отсутствуют inbound-настройки"
+        clients = inbounds[0].get("settings", {}).get("clients", [])
         count = len(clients)
         return count, f"Найдено {count} пользователей в конфигурации Xray"
     except Exception as e:
